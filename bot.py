@@ -1,11 +1,11 @@
-import random, logging, asyncio, os, sqlite3
+import random, asyncio, sqlite3, os
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from faker import Faker
-from aiohttp import web
 
 # --- কনফিগারেশন ---
 API_TOKEN = '8527092463:AAF0Kj3grq53tUJn10YmjyDIo3Z7iOexkYg'
@@ -15,39 +15,41 @@ PHOTO_URL = 'https://res.cloudinary.com/dv6ugwzk8/image/upload/v1758564178/jnzm7
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# --- ডাটাবেস ---
-conn = sqlite3.connect('database.db', check_same_thread=False)
+# --- ডাটাবেস ম্যানেজমেন্ট ---
+conn = sqlite3.connect('premium_bot.db', check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)')
-cursor.execute('CREATE TABLE IF NOT EXISTS bins (bin TEXT PRIMARY KEY, country TEXT)')
+cursor.execute('CREATE TABLE IF NOT EXISTS bins (bin TEXT PRIMARY KEY, country TEXT, service TEXT)')
 conn.commit()
 
-class AdminStates(StatesGroup):
-    add_bin = State()
+class BotStates(StatesGroup):
+    add_bin_num = State()
+    add_bin_service = State()
+    add_bin_country = State()
     broadcast = State()
     user_bin_input = State()
     fake_info_country = State()
     fake_info_gender = State()
 
-# --- মেনু বাটনসমূহ ---
+# --- প্রিমিয়াম কিবোর্ড ডিজাইন ---
 def main_menu(user_id):
     kb = [
-        [types.KeyboardButton(text="💳 Create Credit Card")],
-        [types.KeyboardButton(text="🌍 Create Fake Card Info")]
+        [types.KeyboardButton(text="💳 𝗖𝗥𝗘𝗔𝗧𝗘 𝗖𝗔𝗥𝗗"), types.KeyboardButton(text="🌍 𝗙𝗔𝗞𝗘 𝗜𝗡𝗙𝗢")],
+        [types.KeyboardButton(text="🆘 𝗦𝗨𝗣𝗣𝗢𝗥𝗧")]
     ]
     if user_id == ADMIN_ID:
-        kb.append([types.KeyboardButton(text="🛠 Admin Control Panel")])
+        kb.append([types.KeyboardButton(text="🛠 𝗔𝗗𝗠𝗜𝗡 𝗖𝗢𝗡𝗧𝗥𝗢𝗟")])
     return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def card_menu():
     kb = [
-        [types.KeyboardButton(text="💎 Choice Admin Card")],
-        [types.KeyboardButton(text="⌨️ Create Your Bin Card")],
-        [types.KeyboardButton(text="🔙 Back to Main Menu")]
+        [types.KeyboardButton(text="💎 𝗖𝗛𝗢𝗜𝗖𝗘 𝗔𝗗𝗠𝗜𝗡 𝗕𝗜𝗡")],
+        [types.KeyboardButton(text="⌨️ 𝗘𝗡𝗧𝗘𝗥 𝗬𝗢𝗨𝗥 𝗕𝗜𝗡")],
+        [types.KeyboardButton(text="🔙 𝗕𝗔𝗖𝗞 𝗧𝗢 𝗠𝗘𝗡𝗨")]
     ]
     return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# --- কার্ড জেনারেটর ---
+# --- কার্ড জেনারেটর কোড ---
 def generate_card(bin_num):
     card = str(bin_num)[:12]
     while len(card) < 15: card += str(random.randint(0, 9))
@@ -56,190 +58,108 @@ def generate_card(bin_num):
         n = int(digit); sum_val += (n*2 - 9 if n*2 > 9 else n*2) if i % 2 == 0 else n
     return card + str((10 - (sum_val % 10)) % 10)
 
-# --- হ্যান্ডলারস ---
-@dp.message(Command("start"))
-@dp.message(F.text == "🔙 Back to Main Menu")
-async def start(message: types.Message, state: FSMContext):
-    await state.clear()
-    cursor.execute('INSERT OR IGNORE INTO users VALUES (?)', (message.from_user.id,))
-    conn.commit()
-    welcome_text = (
-        "👋 **Hello!** Welcome to our Premium Card Gen Bot.\n\n"
-        "Please select an option from the menu below to get started! 🚀"
-    )
-    await message.answer(welcome_text, reply_markup=main_menu(message.from_user.id), parse_mode="Markdown")
-
-# --- Fake Info Generator ---
-@dp.message(F.text == "🌍 Create Fake Card Info")
-async def ask_info_country(message: types.Message, state: FSMContext):
-    await message.answer("📍 **Enter Country Name:**\n\nExample: `USA`, `UK`, `Canada`", parse_mode="Markdown")
-    await state.set_state(AdminStates.fake_info_country)
-
-@dp.message(AdminStates.fake_info_country)
-async def ask_info_gender(message: types.Message, state: FSMContext):
-    await state.update_data(country=message.text)
-    kb = [[
-        types.InlineKeyboardButton(text="♂️ Male", callback_data="gender_male"),
-        types.InlineKeyboardButton(text="♀️ Female", callback_data="gender_female")
-    ]]
-    await message.answer("🧬 **Select Gender:**", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
-    await state.set_state(AdminStates.fake_info_gender)
-
-@dp.callback_query(F.data.startswith("gender_"))
-async def send_fake_info(cb: types.CallbackQuery, state: FSMContext):
-    gender = cb.data.split('_')[1]
-    user_data = await state.get_data()
-    country = user_data.get('country')
+# --- গ্রুপ কমান্ড সাপোর্ট: /gen 515462 ---
+@dp.message(Command("gen"))
+async def group_gen_handler(message: types.Message, command: CommandObject):
+    if not command.args:
+        return await message.reply("❌ **ERROR:** বিন দিতে ভুলে গেছেন!\n\nউদাহরণ: `/gen 515462`", parse_mode="Markdown")
     
+    bin_n = "".join(filter(str.isdigit, command.args))[:6]
+    if len(bin_n) < 6:
+        return await message.reply("❌ **ERROR:** বিন কমপক্ষে ৬ ডিজিটের হতে হবে।")
+
+    text = "✨ 〘 𝗖𝗛𝗘𝗖𝗞 𝗔𝗡𝗗 𝗦𝗔𝗩𝗘 𝗬𝗢𝗨𝗥 𝗣𝗥𝗘𝗠𝗜𝗨𝗠 〙 ✨\n\n\n"
+    for _ in range(10):
+        text += f"💳 `{generate_card(bin_n)}|{random.randint(1,12):02}|2028|{random.randint(100,999)}`\n\n"
+    
+    await message.answer_photo(photo=PHOTO_URL, caption=text, parse_mode="Markdown")
+
+# --- ধাপে ধাপে বিন অ্যাড (অ্যাডমিন) ---
+@dp.callback_query(F.data == "add_b")
+async def step_1_bin(cb: types.CallbackQuery, state: FSMContext):
+    await cb.message.answer("📥 **STEP 1: এন্টার বিন**\n\nউদাহরণ: `515462` বা `51546200`", parse_mode="Markdown")
+    await state.set_state(BotStates.add_bin_num)
+
+@dp.message(BotStates.add_bin_num)
+async def step_2_service(message: types.Message, state: FSMContext):
+    bin_clean = "".join(filter(str.isdigit, message.text.split('|')[0]))[:6]
+    await state.update_data(bin=bin_clean)
+    await message.answer("🛠 **STEP 2: সার্ভিসের নাম**\n\nউদাহরণ: `Netflix`, `Amazon` বা `Mastercard`")
+    await state.set_state(BotStates.add_bin_service)
+
+@dp.message(BotStates.add_bin_service)
+async def step_3_country(message: types.Message, state: FSMContext):
+    await state.update_data(service=message.text)
+    await message.answer("🌍 **STEP 3: দেশের নাম**\n\nউদাহরণ: `USA`, `UK` বা `BD`")
+    await state.set_state(BotStates.add_bin_country)
+
+@dp.message(BotStates.add_bin_country)
+async def final_bin_save(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    cursor.execute('INSERT OR REPLACE INTO bins VALUES (?, ?, ?)', (data['bin'], message.text, data['service']))
+    conn.commit()
+    res_text = (
+        f"✅ **𝗦𝗨𝗖𝗖𝗘𝗦𝗦𝗙𝗨𝗟𝗟𝗬 𝗦𝗔𝗩𝗘𝗗!**\n\n"
+        f"💳 **𝗕𝗜𝗡 :** `{data['bin']}`\n\n"
+        f"🛠 **𝗦𝗘𝗥𝗩𝗜𝗖𝗘 :** `{data['service']}`\n\n"
+        f"🌍 **𝗖𝗢𝗨𝗡𝗧𝗥𝗬 :** `{message.text}`"
+    )
+    await message.answer(res_text, parse_mode="Markdown")
+    await state.clear()
+
+# --- প্রিমিয়াম ডিজাইন আউটপুট ---
+@dp.callback_query(F.data.startswith("gen_"))
+async def premium_card_output(cb: types.CallbackQuery):
+    bin_n = cb.data.split('_')[1]
+    cursor.execute('SELECT country, service FROM bins WHERE bin=?', (bin_n,))
+    info = cursor.fetchone()
     f = Faker()
-    name = f.name_male() if gender == "male" else f.name_female()
-    info = (
-        f"✨ **FAKE IDENTITY INFO** ✨\n\n"
-        f"🌍 **𝗖𝗢𝗨𝗡𝗧𝗥𝗬 :** `{country}`\n\n"
-        f"👨‍💻 **𝗡𝗔𝗠𝗘 :** `{name}`\n\n"
-        f"🏠 **𝗔𝗗𝗗𝗥𝗘𝗦𝗦 :** `{f.street_address()}`\n\n"
-        f"🏙️ **𝗖𝗜𝗧𝗬 :** `{f.city()}`\n\n"
+    
+    output = (
+        f"✨ **𝗖𝗛𝗘𝗖𝗞 𝗔𝗡𝗗 𝗦𝗔𝗩𝗘 𝗬𝗢𝗨𝗥 {info[1].upper()}** ✨\n\n\n"
+        f"💳 **𝗖𝗔𝗥𝗗 𝗡𝗨𝗠𝗕𝗘𝗥 :** `{generate_card(bin_n)}`\n\n"
+        f"📅 **𝗠𝗠/𝗬𝗬 :** `{random.randint(1,12):02}/2028`\n\n"
+        f"🔒 **𝗦𝗘𝗖𝗨𝗥𝗜𝗧𝗬 𝗖𝗢𝗗𝗘 / 𝗖𝗩𝗩 :** `{random.randint(100,999)}`\n\n"
+        f"🌍 **𝗖𝗢𝗨𝗡𝗧𝗥𝗬 :** `{info[0]}`\n\n"
+        f"👨‍💻 **NAME :** `{f.name()}`\n\n"
+        f"🏠 **𝗔𝗗𝗗𝗥𝗘𝗦𝗦 𝗟𝗜𝗡𝗘 𝟭 :** `{f.street_address()}`\n\n"
+        f"🏙️ **𝗧𝗢𝗪𝗡 / 𝗖𝗜𝗧𝗬 :** `{f.city()}`\n\n"
         f"📮 **𝗣𝗢𝗦𝗧𝗖𝗢𝗗𝗘 :** `{f.postcode()}`\n\n"
         f"📍 **𝗦𝗧𝗔𝗧𝗘 :** `{f.state()}`"
     )
-    await cb.message.edit_text(info, parse_mode="Markdown")
+    await bot.send_photo(cb.message.chat.id, photo=PHOTO_URL, caption=output, parse_mode="Markdown")
+
+# --- মূল হ্যান্ডলারস ---
+@dp.message(Command("start"))
+@dp.message(F.text == "🔙 𝗕𝗔𝗖𝗞 𝗧𝗢 𝗠𝗘𝗡𝗨")
+async def welcome_handler(message: types.Message, state: FSMContext):
     await state.clear()
-
-# --- কার্ড জেনারেটর ---
-@dp.message(F.text == "⌨️ Create Your Bin Card")
-async def ask_user_bin(message: types.Message, state: FSMContext):
-    await message.answer("📥 **Enter Your BIN:**\n\nExample: `515462`", parse_mode="Markdown")
-    await state.set_state(AdminStates.user_bin_input)
-
-@dp.message(AdminStates.user_bin_input)
-async def gen_user_custom(message: types.Message, state: FSMContext):
-    bin_n = "".join(filter(str.isdigit, message.text))[:6]
-    month, year = str(random.randint(1,12)).zfill(2), str(random.randint(2026, 2031))
-    text = "✨ 〘 𝗖𝗛𝗘𝗖𝗞 𝗔𝗡𝗗 𝗦𝗔𝗩𝗘 𝗬𝗢𝗨𝗥 𝗣𝗥𝗘𝗠𝗜𝗨𝗠 〙 ✨\n\n"
-    for _ in range(10):
-        text += f"💳 `{generate_card(bin_n)}|{month}|{year}|{random.randint(100,999)}`\n\n"
-    await message.answer_photo(photo=PHOTO_URL, caption=text, parse_mode="Markdown")
-    await state.clear()
-
-@dp.message(F.text == "💎 Choice Admin Card")
-async def show_admin_bins(message: types.Message):
-    cursor.execute('SELECT bin, country FROM bins')
-    bins = cursor.fetchall()
-    if not bins:
-        return await message.answer("⚠️ **No premium bins set by admin yet!**")
-    kb = [[types.InlineKeyboardButton(text=f"💳 {b[0]} ({b[1]})", callback_data=f"gen_{b[0]}")] for b in bins]
-    await message.answer("💎 **Select a premium BIN from the list:**", 
-                         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
-
-@dp.callback_query(F.data.startswith("gen_"))
-async def gen_from_admin_list(cb: types.CallbackQuery):
-    bin_n = cb.data.split('_')[1]
-    f = Faker()
-    text = (
-        f"✨ **𝗣𝗥𝗘𝗠𝗜𝗨𝗠 𝗠𝗔𝗦𝗧𝗘𝗥𝗖𝗔𝗥𝗗** ✨\n\n"
-        f"💳 **𝗖𝗔𝗥𝗗 :** `{generate_card(bin_n)}`\n\n"
-        f"📅 **𝗠𝗠/𝗬𝗬 :** `{random.randint(1,12)}/2028`\n\n"
-        f"🔒 **𝗖𝗩𝗩 :** `{random.randint(100,999)}`\n\n"
-        f"👨‍💻 **𝗡𝗔𝗠𝗘 :** `{f.name()}`\n\n"
-        f"🏠 **𝗔𝗗𝗗𝗥𝗘𝗦𝗦 :** `{f.street_address()}`\n\n"
-        f"🏙️ **𝗖𝗜𝗧𝗬 :** `{f.city()}`"
-    )
-    await bot.send_photo(cb.message.chat.id, photo=PHOTO_URL, caption=text, parse_mode="Markdown")
-
-@dp.message(F.text == "💳 Create Credit Card")
-async def card_options(message: types.Message):
-    await message.answer("🚀 **Select Generation Method:**", reply_markup=card_menu())
-
-# --- অ্যাডমিন প্যানেল ভিউ ---
-@dp.callback_query(F.data == "admin_home")
-@dp.message(F.text == "🛠 Admin Control Panel")
-async def admin_panel_view(message: types.Message | types.CallbackQuery):
-    user_id = message.from_user.id
-    if user_id != ADMIN_ID: return
-    
-    cursor.execute('SELECT COUNT(*) FROM users'); total_u = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM bins'); total_b = cursor.fetchone()[0]
-    
-    kb = [
-        [types.InlineKeyboardButton(text="➕ Add New BIN", callback_data="add_b"),
-         types.InlineKeyboardButton(text="🗑 Delete BIN", callback_data="list_del_b")],
-        [types.InlineKeyboardButton(text="📢 Broadcast", callback_data="bc_all")],
-        [types.InlineKeyboardButton(text="🔄 Refresh", callback_data="admin_home")]
-    ]
-    
-    admin_text = (
-        f"🛠 **ADMIN DASHBOARD**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 **Total Users:** `{total_u}`\n\n"
-        f"💳 **Stored BINs:** `{total_b}`\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Select an action below to manage the bot:"
-    )
-    
-    if isinstance(message, types.Message):
-        await message.answer(admin_text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
-    else:
-        await message.message.edit_text(admin_text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
-
-# --- অ্যাডমিন অ্যাকশনস ---
-@dp.callback_query(F.data == "list_del_b")
-async def list_bins_to_delete(cb: types.CallbackQuery):
-    cursor.execute('SELECT bin, country FROM bins')
-    bins = cursor.fetchall()
-    if not bins:
-        return await cb.answer("No bins to delete!", show_alert=True)
-    
-    kb = [[types.InlineKeyboardButton(text=f"❌ Delete {b[0]}", callback_data=f"del_{b[0]}")] for b in bins]
-    kb.append([types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin_home")])
-    await cb.message.edit_text("🗑 **Select a BIN to remove from database:**", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
-
-@dp.callback_query(F.data.startswith("del_"))
-async def delete_bin_exec(cb: types.CallbackQuery):
-    bin_to_del = cb.data.split('_')[1]
-    cursor.execute('DELETE FROM bins WHERE bin=?', (bin_to_del,))
+    cursor.execute('INSERT OR IGNORE INTO users VALUES (?)', (message.from_user.id,))
     conn.commit()
-    await cb.answer(f"BIN {bin_to_del} Deleted!", show_alert=True)
-    await list_bins_to_delete(cb)
+    await message.answer("👋 **𝗪𝗘𝗟𝗖𝗢𝗠𝗘!** নিচের মেনু থেকে অপশন বেছে নিন:", reply_markup=main_menu(message.from_user.id))
 
-@dp.callback_query(F.data == "add_b")
-async def add_b_start(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("📥 **Send New BIN & Country:**\n\nFormat: `BIN|Country` (Example: `515462|USA`)", parse_mode="Markdown")
-    await state.set_state(AdminStates.add_bin)
+@dp.message(F.text == "🛠 𝗔𝗗𝗠𝗜𝗡 𝗖𝗢𝗡𝗧𝗥𝗢𝗟")
+async def admin_main(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    kb = [[types.InlineKeyboardButton(text="➕ 𝗔𝗗𝗗 𝗕𝗜𝗡", callback_data="add_b"), 
+           types.InlineKeyboardButton(text="🗑 𝗗𝗘𝗟𝗘𝗧𝗘 𝗕𝗜𝗡", callback_data="list_del_b")]]
+    await message.answer("🛠 **ADMIN DASHBOARD**", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
 
-@dp.message(AdminStates.add_bin)
-async def add_b_save(message: types.Message, state: FSMContext):
-    try:
-        b, c = message.text.split('|')
-        cursor.execute('INSERT OR REPLACE INTO bins VALUES (?, ?)', (b.strip(), c.strip()))
-        conn.commit()
-        await message.answer("✅ **BIN successfully added to database!**")
-    except:
-        await message.answer("❌ **Error!** Use format: `BIN|Country`")
-    await state.clear()
+@dp.message(F.text == "💳 𝗖𝗥𝗘𝗔𝗧𝗘 𝗖𝗔𝗥𝗗")
+async def method_selection(message: types.Message):
+    await message.answer("🚀 **জেনারেশন মেথড সিলেক্ট করুন:**", reply_markup=card_menu())
 
-@dp.callback_query(F.data == "bc_all")
-async def bc_start(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("📢 **Enter Broadcast Message:**")
-    await state.set_state(AdminStates.broadcast)
+@dp.message(F.text == "💎 𝗖𝗛𝗢𝗜𝗖𝗘 𝗔𝗗𝗠𝗜𝗡 𝗕𝗜𝗡")
+async def list_admin_bins(message: types.Message):
+    cursor.execute('SELECT bin, country, service FROM bins')
+    bins = cursor.fetchall()
+    if not bins: return await message.answer("⚠️ কোনো বিন এখনো সেট করা হয়নি।")
+    kb = [[types.InlineKeyboardButton(text=f"💳 {b[0]} | {b[2]}", callback_data=f"gen_{b[0]}")] for b in bins]
+    await message.answer("💎 **প্রিমিয়াম বিন লিস্ট:**", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb))
 
-@dp.message(AdminStates.broadcast)
-async def bc_done(message: types.Message, state: FSMContext):
-    cursor.execute('SELECT user_id FROM users'); users = cursor.fetchall()
-    count = 0
-    for u in users:
-        try:
-            await message.copy_to(u[0])
-            count += 1
-        except: pass
-    await message.answer(f"✅ **Broadcast Done!**\n\nSent to `{count}` users.")
-    await state.clear()
-
-# --- রেন্ডার ওয়েব সার্ভার ---
-async def handle(r): return web.Response(text="Bot Alive")
 async def main():
-    app = web.Application(); app.router.add_get('/', handle)
-    runner = web.AppRunner(app); await runner.setup()
-    await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 10000))).start()
+    print("Bot is Live on Termux!")
     await dp.start_polling(bot)
 
-if __name__ == "__main__": asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
